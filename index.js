@@ -212,8 +212,9 @@ io.on('connection', (socket) => {
       restants.forEach(j => {
         io.to(j.id).emit('binome_capture', {
           prenomCapture,
-          message: `${prenomCapture} a été capturé ! Tu es seul, rejoins une autre équipe !`,
-          codePartie
+          message: `${prenomCapture} a été capturé ! Tu es seul, rejoins un groupe ou continue seul !`,
+          codePartie,
+          equipes: partie.equipes
         });
       });
       io.to(codePartie).emit('update_partie', parties[codePartie]);
