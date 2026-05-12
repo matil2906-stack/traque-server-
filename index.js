@@ -1,4 +1,4 @@
-*const express = require('express');
+const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
 
@@ -8,12 +8,22 @@ const io = new Server(server, { cors: { origin: '*' } });
 
 const parties = {};
 
-function genCode(len = 4) {
+function genCode() {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-  let code = '';
-  for (let i = 0; i < len; i++) code += chars[Math.floor(Math.random() * chars.length)];
-  return code.slice(0, 2) + '-' + code.slice(2);
+  let c = '';
+  for (let i = 0; i < 4; i++) c += chars[Math.floor(Math.random() * chars.length)];
+  return c.slice(0, 2) + '-' + c.slice(2);
 }
+
+function genCodeEquipe() {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  let c = '';
+  for (let i = 0; i < 4; i++) c += chars[Math.floor(Math.random() * chars.length)];
+  return c;
+}
+
+const BONUS_LIST = ['bouclier', 'revelation', 'brouillard', 'changement'];
+function bonusAlea() { return BONUS_LIST[Math.floor(Math.random() * BONUS_LIST.length)]; }
 
 function assignerCibles(equipes) {
   const ids = Object.keys(equipes).filter(id => !equipes[id].eliminee);
@@ -25,38 +35,24 @@ function assignerCibles(equipes) {
   return cibles;
 }
 
-const BONUS_LIST = ['bouclier', 'revelation', 'brouillard', 'changement'];
-function bonusAleatoire() { return BONUS_LIST[Math.floor(Math.random() * BONUS_LIST.length)]; }
-
-function creerEquipe(socketId, prenom, nom, codeEquipe) {
-  return {
-    nom, codeEquipe,
-    joueurs: [{ id: socketId, prenom, pret: false, capture: false }],
-    pret: false, eliminee: false,
-    bonus: bonusAleatoire(),
-    bouclierActif: false, brouillardActif: false,
-    position: null,
-  };
-}
-
-function tousCaptures(equipe) {
-  return equipe.joueurs.every(j => j.capture);
-}
-
-function equipeComplete(partie) {
-  const restantes = Object.values(partie.equipes).filter(e => !e.eliminee);
-  return restantes.length === 1;
-}
+function tousCaptures(eq) { return eq.joueurs.every(j => j.capture); }
 
 io.on('connection', (socket) => {
 
-  // ─── CRÉER UNE PARTIE ───
+  // CREER PARTIE
   socket.on('creer_partie', ({ prenom, nomEquipe }) => {
     const codePartie = genCode();
-    const codeEquipe = genCode(4).replace('-', '');
+    const codeEquipe = genCodeEquipe();
     parties[codePartie] = {
       code: codePartie, statut: 'attente', cibles: {},
-      equipes: { [codeEquipe]: creerEquipe(socket.id, prenom, nomEquipe, codeEquipe) }
+      equipes: {
+        [codeEquipe]: {
+          nom: nomEquipe, codeEquipe,
+          joueurs: [{ id: socket.id, prenom, pret: false, capture: false }],
+          pret: false, eliminee: false, bonus: bonusAlea(),
+          bouclierActif: false, brouillardActif: false, position: null
+        }
+      }
     };
     socket.join(codePartie); socket.join(codeEquipe);
     socket.data = { codePartie, codeEquipe, prenom };
@@ -64,40 +60,42 @@ io.on('connection', (socket) => {
     io.to(codePartie).emit('update_partie', parties[codePartie]);
   });
 
-  // ─── REJOINDRE UNE PARTIE ───
+  // REJOINDRE PARTIE
   socket.on('rejoindre_partie', ({ prenom, codePartie }) => {
     const partie = parties[codePartie];
     if (!partie) return socket.emit('erreur', 'Partie introuvable');
-    if (partie.statut !== 'attente') return socket.emit('erreur', 'Partie déjà lancée');
-    const codeEquipe = genCode(4).replace('-', '');
-    partie.equipes[codeEquipe] = creerEquipe(socket.id, prenom, `Équipe de ${prenom}`, codeEquipe);
+    if (partie.statut !== 'attente') return socket.emit('erreur', 'Partie deja lancee');
+    const codeEquipe = genCodeEquipe();
+    partie.equipes[codeEquipe] = {
+      nom: 'Equipe de ' + prenom, codeEquipe,
+      joueurs: [{ id: socket.id, prenom, pret: false, capture: false }],
+      pret: false, eliminee: false, bonus: bonusAlea(),
+      bouclierActif: false, brouillardActif: false, position: null
+    };
     socket.join(codePartie); socket.join(codeEquipe);
     socket.data = { codePartie, codeEquipe, prenom };
     socket.emit('rejoint_partie', { codePartie, codeEquipe });
     io.to(codePartie).emit('update_partie', parties[codePartie]);
   });
 
-  // ─── REJOINDRE UNE ÉQUIPE (binôme ou trio) ───
+  // REJOINDRE EQUIPE (binome ou trio en cours)
   socket.on('rejoindre_equipe', ({ prenom, codePartie, codeEquipe }) => {
     const partie = parties[codePartie];
     if (!partie) return socket.emit('erreur', 'Partie introuvable');
     const equipe = partie.equipes[codeEquipe];
-    if (!equipe) return socket.emit('erreur', 'Équipe introuvable');
-    if (equipe.joueurs.filter(j => !j.capture).length >= 3) return socket.emit('erreur', 'Équipe déjà complète (max 3)');
+    if (!equipe) return socket.emit('erreur', 'Equipe introuvable');
+    if (equipe.joueurs.filter(j => !j.capture).length >= 3) return socket.emit('erreur', 'Equipe pleine');
 
     equipe.joueurs.push({ id: socket.id, prenom, pret: false, capture: false });
     socket.join(codePartie); socket.join(codeEquipe);
     socket.data = { codePartie, codeEquipe, prenom };
 
-    // Si la partie est déjà lancée → joueur solo qui rejoint un trio
     if (partie.statut === 'jeu') {
-      socket.emit('rejoint_equipe_en_cours', {
+      const idCible = partie.cibles[codeEquipe];
+      const eqCible = idCible ? partie.equipes[idCible] : null;
+      socket.emit('rejoint_en_cours', {
         codePartie, codeEquipe, nomEquipe: equipe.nom,
-        cible: partie.cibles[codeEquipe] ? {
-          codeEquipe: partie.cibles[codeEquipe],
-          nom: partie.equipes[partie.cibles[codeEquipe]]?.nom,
-          joueurs: partie.equipes[partie.cibles[codeEquipe]]?.joueurs.map(j => j.prenom)
-        } : null,
+        cible: eqCible ? { codeEquipe: idCible, nom: eqCible.nom, joueurs: eqCible.joueurs.filter(j=>!j.capture).map(j=>j.prenom) } : null,
         bonus: equipe.bonus
       });
     } else {
@@ -106,14 +104,13 @@ io.on('connection', (socket) => {
     io.to(codePartie).emit('update_partie', parties[codePartie]);
   });
 
-  // ─── MARQUER PRÊT ───
+  // PRET
   socket.on('je_suis_pret', () => {
     const { codePartie, codeEquipe } = socket.data || {};
     const partie = parties[codePartie];
     if (!partie) return;
     const equipe = partie.equipes[codeEquipe];
     if (!equipe) return;
-
     equipe.joueurs.forEach(j => { if (j.id === socket.id) j.pret = true; });
     equipe.pret = equipe.joueurs.every(j => j.pret);
     io.to(codePartie).emit('update_partie', parties[codePartie]);
@@ -122,22 +119,20 @@ io.on('connection', (socket) => {
     if (toutesPretes && Object.keys(partie.equipes).length >= 2) {
       partie.statut = 'countdown';
       io.to(codePartie).emit('countdown_start', { duree: 30 });
-
       setTimeout(() => {
         if (!parties[codePartie]) return;
         partie.statut = 'jeu';
-        io.to(codePartie).emit('jeu_lance_sans_cible');
-
-        // Après 10 min → révéler les cibles
+        io.to(codePartie).emit('jeu_lance');
+        // Apres 10 min -> reveler les cibles
         setTimeout(() => {
           if (!parties[codePartie]) return;
           partie.cibles = assignerCibles(partie.equipes);
-          Object.entries(partie.cibles).forEach(([idEquipe, idCible]) => {
-            const eq = partie.equipes[idEquipe];
-            const cibleEq = partie.equipes[idCible];
-            if (!eq || !cibleEq) return;
-            io.to(idEquipe).emit('cible_revelee', {
-              cible: { codeEquipe: idCible, nom: cibleEq.nom, joueurs: cibleEq.joueurs.map(j => j.prenom) },
+          Object.entries(partie.cibles).forEach(([idEq, idCible]) => {
+            const eq = partie.equipes[idEq];
+            const eqCible = partie.equipes[idCible];
+            if (!eq || !eqCible) return;
+            io.to(idEq).emit('cible_revelee', {
+              cible: { codeEquipe: idCible, nom: eqCible.nom, joueurs: eqCible.joueurs.filter(j=>!j.capture).map(j=>j.prenom) },
               bonus: eq.bonus
             });
           });
@@ -146,74 +141,55 @@ io.on('connection', (socket) => {
     }
   });
 
-  // ─── CAPTURER UN JOUEUR ───
+  // CAPTURER UN JOUEUR
   socket.on('capturer_joueur', ({ codePartie, codeEquipeCible, prenomCapture, photo }) => {
     const partie = parties[codePartie];
     if (!partie) return;
     const { codeEquipe } = socket.data || {};
-    const equipeCible = partie.equipes[codeEquipeCible];
-    const equipeChasseur = partie.equipes[codeEquipe];
-    if (!equipeCible || equipeCible.eliminee) return;
+    const eqCible = partie.equipes[codeEquipeCible];
+    const eqChasseur = partie.equipes[codeEquipe];
+    if (!eqCible || eqCible.eliminee) return;
     if (partie.cibles[codeEquipe] !== codeEquipeCible) return;
-    if (equipeCible.bouclierActif) return socket.emit('erreur_bonus', '🛡️ Cette équipe est protégée !');
+    if (eqCible.bouclierActif) return socket.emit('erreur_bonus', 'Bouclier actif !');
 
-    // Marquer le joueur comme capturé
-    const joueur = equipeCible.joueurs.find(j => j.prenom === prenomCapture && !j.capture);
-    if (!joueur) return socket.emit('erreur', 'Joueur introuvable ou déjà capturé');
+    const joueur = eqCible.joueurs.find(j => j.prenom === prenomCapture && !j.capture);
+    if (!joueur) return;
     joueur.capture = true;
 
-    // Envoyer la preuve à tout le monde
+    const restants = eqCible.joueurs.filter(j => !j.capture).map(j => j.prenom);
+
     io.to(codePartie).emit('joueur_capture', {
-      nomEquipe: equipeCible.nom,
-      prenomCapture,
-      capturePar: equipeChasseur?.nom,
-      photo: photo || null,
-      restants: equipeCible.joueurs.filter(j => !j.capture).map(j => j.prenom)
+      nomEquipe: eqCible.nom, prenomCapture,
+      capturePar: eqChasseur?.nom, photo: photo || null, restants
     });
 
-    // Est-ce que toute l'équipe est capturée ?
-    if (tousCaptures(equipeCible)) {
-      // Équipe complètement éliminée
-      equipeCible.eliminee = true;
-
-      // Héritage : nouvelle cible = cible de la cible
+    if (tousCaptures(eqCible)) {
+      eqCible.eliminee = true;
+      // Heritage de cible
       const nouvelleCibleId = partie.cibles[codeEquipeCible];
       if (nouvelleCibleId && nouvelleCibleId !== codeEquipe) {
         partie.cibles[codeEquipe] = nouvelleCibleId;
-        const nouvelleCibleEq = partie.equipes[nouvelleCibleId];
-        if (nouvelleCibleEq) {
+        const nouvEqCible = partie.equipes[nouvelleCibleId];
+        if (nouvEqCible) {
           io.to(codeEquipe).emit('nouvelle_cible', {
-            cible: { codeEquipe: nouvelleCibleId, nom: nouvelleCibleEq.nom, joueurs: nouvelleCibleEq.joueurs.map(j => j.prenom) }
+            cible: { codeEquipe: nouvelleCibleId, nom: nouvEqCible.nom, joueurs: nouvEqCible.joueurs.filter(j=>!j.capture).map(j=>j.prenom) }
           });
         }
       }
-
-      // Bonus de la cible transféré si pas utilisé
-      const bonusRecupere = equipeCible.bonus;
-      if (bonusRecupere) {
-        equipeChasseur.bonus = bonusRecupere;
-        io.to(codeEquipe).emit('nouveau_bonus', { bonus: bonusRecupere, message: `Bonus récupéré sur ${equipeCible.nom} !` });
-      } else {
-        const nouveauBonus = bonusAleatoire();
-        equipeChasseur.bonus = nouveauBonus;
-        io.to(codeEquipe).emit('nouveau_bonus', { bonus: nouveauBonus });
-      }
-
-      io.to(codePartie).emit('equipe_eliminee', { nomEquipe: equipeCible.nom, eliminePar: equipeChasseur?.nom, photo });
+      // Recuperer le bonus de la cible ou en avoir un nouveau
+      const bonusRecup = eqCible.bonus || bonusAlea();
+      eqChasseur.bonus = bonusRecup;
+      io.to(codeEquipe).emit('nouveau_bonus', { bonus: bonusRecup });
+      io.to(codePartie).emit('equipe_eliminee', { nomEquipe: eqCible.nom, eliminePar: eqChasseur?.nom, photo });
       io.to(codePartie).emit('update_partie', parties[codePartie]);
-
-      if (equipeComplete(partie)) {
-        const gagnant = Object.values(partie.equipes).find(e => !e.eliminee);
-        io.to(codePartie).emit('fin_partie', { gagnant: gagnant?.nom });
-      }
+      const restantes = Object.values(partie.equipes).filter(e => !e.eliminee);
+      if (restantes.length === 1) io.to(codePartie).emit('fin_partie', { gagnant: restantes[0].nom });
     } else {
-      // Il reste des joueurs dans l'équipe → solo
-      const restants = equipeCible.joueurs.filter(j => !j.capture);
-      restants.forEach(j => {
+      // Solo -> envoyer la liste des equipes
+      eqCible.joueurs.filter(j => !j.capture).forEach(j => {
         io.to(j.id).emit('binome_capture', {
           prenomCapture,
-          message: `${prenomCapture} a été capturé ! Tu es seul, rejoins un groupe ou continue seul !`,
-          codePartie,
+          message: prenomCapture + ' a ete capture ! Rejoins un groupe ou continue seul.',
           equipes: partie.equipes
         });
       });
@@ -221,30 +197,29 @@ io.on('connection', (socket) => {
     }
   });
 
-  // ─── UTILISER UN BONUS ───
+  // UTILISER BONUS
   socket.on('utiliser_bonus', ({ codePartie }) => {
     const { codeEquipe } = socket.data || {};
     const partie = parties[codePartie];
     if (!partie) return;
     const equipe = partie.equipes[codeEquipe];
     if (!equipe || !equipe.bonus) return;
-
     const bonus = equipe.bonus;
     equipe.bonus = null;
 
     if (bonus === 'bouclier') {
       equipe.bouclierActif = true;
-      io.to(codeEquipe).emit('bonus_active', { bonus, message: '🛡️ Bouclier actif 2 min !' });
+      io.to(codeEquipe).emit('bonus_active', { bonus, message: 'Bouclier actif 2 min !' });
       io.to(codePartie).emit('bonus_visible', { nomEquipe: equipe.nom, bonus });
       setTimeout(() => { equipe.bouclierActif = false; io.to(codeEquipe).emit('bouclier_expire'); }, 120000);
     } else if (bonus === 'revelation') {
       const idCible = partie.cibles[codeEquipe];
-      const cibleEq = idCible ? partie.equipes[idCible] : null;
-      socket.emit('bonus_active', { bonus, message: cibleEq?.position ? '👁️ Position visible 30 sec !' : '👁️ Pas encore de GPS.', position: cibleEq?.position || null });
+      const eqCible = idCible ? partie.equipes[idCible] : null;
+      socket.emit('bonus_active', { bonus, message: eqCible?.position ? 'Position visible 30 sec !' : 'Cible sans GPS.', position: eqCible?.position || null });
       io.to(codePartie).emit('bonus_visible', { nomEquipe: equipe.nom, bonus });
     } else if (bonus === 'brouillard') {
       equipe.brouillardActif = true;
-      io.to(codeEquipe).emit('bonus_active', { bonus, message: '💨 Brouillard actif 1 min !' });
+      io.to(codeEquipe).emit('bonus_active', { bonus, message: 'Brouillard 1 min ! Invisible.' });
       io.to(codePartie).emit('bonus_visible', { nomEquipe: equipe.nom, bonus });
       setTimeout(() => { equipe.brouillardActif = false; io.to(codeEquipe).emit('brouillard_expire'); }, 60000);
     } else if (bonus === 'changement') {
@@ -253,14 +228,14 @@ io.on('connection', (socket) => {
         const newId = actives[Math.floor(Math.random() * actives.length)];
         partie.cibles[codeEquipe] = newId;
         const newEq = partie.equipes[newId];
-        io.to(codeEquipe).emit('bonus_active', { bonus, message: '🔄 Nouvelle cible !' });
-        io.to(codeEquipe).emit('nouvelle_cible', { cible: { codeEquipe: newId, nom: newEq.nom, joueurs: newEq.joueurs.map(j => j.prenom) } });
+        io.to(codeEquipe).emit('bonus_active', { bonus, message: 'Nouvelle cible !' });
+        io.to(codeEquipe).emit('nouvelle_cible', { cible: { codeEquipe: newId, nom: newEq.nom, joueurs: newEq.joueurs.filter(j=>!j.capture).map(j=>j.prenom) } });
       }
       io.to(codePartie).emit('bonus_visible', { nomEquipe: equipe.nom, bonus });
     }
   });
 
-  // ─── POSITION GPS ───
+  // GPS
   socket.on('update_position', ({ codePartie, codeEquipe, lat, lng }) => {
     const partie = parties[codePartie];
     if (!partie) return;
@@ -274,9 +249,9 @@ io.on('connection', (socket) => {
     io.to(codePartie).emit('update_positions', positions);
   });
 
-  // ─── DÉCONNEXION ───
+  // DECONNEXION
   socket.on('disconnect', () => {
-    const { codePartie, codeEquipe, prenom } = socket.data || {};
+    const { codePartie, codeEquipe } = socket.data || {};
     if (!codePartie || !parties[codePartie]) return;
     const equipe = parties[codePartie]?.equipes[codeEquipe];
     if (equipe) {
@@ -288,4 +263,4 @@ io.on('connection', (socket) => {
 });
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => console.log(`Serveur lancé sur le port ${PORT}`));
+server.listen(PORT, () => console.log('Serveur lance sur le port ' + PORT));
