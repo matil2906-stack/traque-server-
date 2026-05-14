@@ -51,6 +51,17 @@ function broadcastParties() {
 
 io.on('connection', (socket) => {
 
+  // Demande explicite de la liste
+  socket.on('demander_liste_parties', () => {
+    socket.emit('liste_parties', Object.values(parties)
+      .filter(p => p.statut === 'attente')
+      .map(p => ({
+        code: p.code, nom: p.nom,
+        nbJoueurs: Object.values(p.equipes).reduce((acc, eq) => acc + eq.joueurs.length, 0)
+      }))
+    );
+  });
+
   // Envoyer la liste des parties dès la connexion
   socket.emit('liste_parties', Object.values(parties)
     .filter(p => p.statut === 'attente')
